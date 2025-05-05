@@ -1,18 +1,8 @@
-# See list of custom powershell commands
-# notepad $PROFILE
-
-# activate virtual environment
 function act {
-    Set-Location "C:\Users\your\project\folder"
+    Set-Location "C:\Users\User\Desktop\Folder\university\Project\orthoses-no-GUI-forExperiment"
     . .\env\Scripts\Activate.ps1
 }
 
-# plot data from latest experiment. Replace value of n flag if needed as follows:
-# latest experiment:
-#   plot -n 0
-# second to last experoment
-#   plot -n 1
-# ...
 function plot {
     param(
         [int]$n
@@ -27,28 +17,48 @@ function plot {
     Invoke-Expression $command
 }
 
-# start emulating EMG signal
 function emulate_emg {
     $command = "python ./EEG_emulator.py"
 
     Invoke-Expression $command
 }
 
-# start collecting data and sending commands to MCU
 function collect {
+    param(
+        [switch]$t,     # Accepts the -t flag
+        [switch]$a,
+        [string]$p     # Optional port with default
+    )
+
     $command = "python ./THIS_read_eeg.py"
+
+    if ($t.IsPresent) {
+        $command += " -t"
+    }
+
+    if ($a.IsPresent) {
+        $command += " -a"
+    }
+
+    if ($p) {
+        $command += " -p $p"
+    }
 
     Invoke-Expression $command
 }
+
 
 function what {
     Write-Output "List of the commands"
     
     Write-Output "`n`n-- Inside powershell --"
-    Write-Output "act 			// activate virtual environment"
-    Write-Output "plot [-n 0] 		// plot latest data (specify n to plot older data)"
-    Write-Output "emulate_eeg 		// emulate EMG signal"
-    Write-Output "collect 		// start main program of collecting data and interactring with the mcu"
+    Write-Output "act 					// activate virtual environment"
+    Write-Output "plot [-n 0] 				// plot latest data (specify n to plot older data)"
+    Write-Output "emulate_eeg 				// emulate EMG signal"
+    Write-Output "collect [-p `"COM4`"] [-t] [-a]		// start main program of collecting data and interactring with the mcu
+					// -t - use emulated source
+					// -a - use verbose output
+					// -p `"COM4`" - specify COM-port"
 
     Write-Output "`n`n-- Inside main program - commands to mcu --"
     Write-Output "? 		- get list of possible commands"

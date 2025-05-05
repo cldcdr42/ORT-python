@@ -4,6 +4,12 @@ import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
+from math import pi
+
+import os
+
+import statistics
+
 from pylsl import StreamInlet, resolve_streams, local_clock
 import serial
 
@@ -43,10 +49,31 @@ def read_eeg_data(inlet, eeg_buffer, stop_event):
         sample, timestamp = inlet.pull_sample()
         eeg_buffer.append((timestamp, sample[0]))
 
+def send_command(arduino, command: str):
+    if arduino and arduino.is_open:
+        full_command = f"{command}\n"
+        arduino.write(full_command.encode('utf-8'))
+        print(f"Sent to Arduino: {full_command.strip()}")
+
+def user_command_interface(arduino, stop_event):
+    print("Type commands to send to Arduino (e.g., A-40.5), or 'exit' to stop:")
+    while not stop_event.is_set():
+        try:
+            cmd = input()
+            if cmd.lower() == 'exit':
+                stop_event.set()
+                break
+            if cmd:
+                send_command(arduino, cmd)
+        except EOFError:
+            break
+
 def read_ard_data(serial_port, serial_port_buffer, stop_event):
     while not stop_event.is_set():
         try:
+            #print(repr(serial_port.readline().decode('utf-8')))
             line = serial_port.readline().decode('utf-8').strip()
+            #print(line)
             if line:
                 timestamp = local_clock()
                 serial_port_buffer.append((timestamp, line))
@@ -54,27 +81,23 @@ def read_ard_data(serial_port, serial_port_buffer, stop_event):
             continue
 
 def convert_buffer_to_dataframe(serial_port_buffer):
-    w_data, x_data = [], []
+    mcu_data = []
     for timestamp, line in serial_port_buffer:
         if not line:
             continue
-        parts = line.split(';')
+        #parts = line.split(';')
         try:
-            if line.startswith('W'):
-                w_data.append({
+            if line.startswith('D'):
+                target, velocity, angle = line[1:].split(";")
+                mcu_data.append({
                     'Timestamp': timestamp,
-                    'weigh [kg]': float(parts[2])
-                })
-            elif line.startswith('X'):
-                x_data.append({
-                    'Timestamp': timestamp,
-                    'acc_x': int(parts[2]),
-                    'acc_y': int(parts[3]),
-                    'acc_z': int(parts[4])
+                    'Target [norm]': float(target),
+                    'Angle [rad]': float(angle),
+                    'Velocity [rad/s]': float(velocity),
                 })
         except (IndexError, ValueError):
             continue
-    return pd.DataFrame(w_data), pd.DataFrame(x_data)
+    return pd.DataFrame(mcu_data)
 
 def main():
     stop_event = threading.Event()
@@ -100,14 +123,40 @@ def main():
     eeg_buffer = []
     serial_port_buffer = []
 
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    buffer_for_signal = []
+    i = 0
+    avr_val = 0
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
         print("Starting data collection...")
         executor.submit(read_eeg_data, inlet, eeg_buffer, stop_event)
         executor.submit(read_ard_data, arduino, serial_port_buffer, stop_event)
+        executor.submit(user_command_interface, arduino, stop_event)
 
         try:
             while True:
+                # print(float(inlet.pull_sample()[0][0]))
                 time.sleep(0.01)
+                ###### WRITE HERE SENDING CONTROL SIGNAL AS A FLOAT
+                #buffer_for_signal[i] = float(inlet.pull_sample()[0][0])
+                #i = i + 1
+
+                #if i >= 200:
+                #    i = 0
+                
+                #avr_val = statistics.mean(abs(buffer_for_signal))
+                #print("AVR VAL", avr_val)
+
+                #if avr_val > 1e-4:
+                   # continue
+                    #arduino.write(0.05)
+                ###### WRTIE HERE SENDING CONTROL SIGNAL AS A FLOAT
+
+                """
+                1) Get latest 200 samples?
+                2) Calculate absolute average?
+                3) If it is more, than the threshold, then send a signal
+                """
         except KeyboardInterrupt:
             print("Exiting program gracefully...")
             stop_event.set()
@@ -118,25 +167,37 @@ def main():
         # Process data
         current_time = time.strftime("%Y%m%d_%H%M%S")
         eeg_data = pd.DataFrame(eeg_buffer, columns=["Timestamp", "EMG [V]"])
-        w_data, x_data = convert_buffer_to_dataframe(serial_port_buffer)
+        mcu_data = convert_buffer_to_dataframe(serial_port_buffer)
 
         # Align timestamps to a common start time
         all_timestamps = []
-        for df in [eeg_data, w_data, x_data]:
+        for df in [eeg_data, mcu_data]:
             if not df.empty:
                 df["Timestamp"] = pd.to_numeric(df["Timestamp"], errors="coerce")
                 all_timestamps.append(df["Timestamp"].min())
 
         common_start = min(all_timestamps) if all_timestamps else 0
 
-        for df in [w_data, x_data]:
+        for df in [mcu_data]:
             if not df.empty:
                 df["Timestamp"] -= common_start
         eeg_data["Timestamp"] = eeg_data["Timestamp"] - eeg_data["Timestamp"].iloc[0]
         # Save data
-        eeg_data.to_csv(f"measurements/{current_time}_EEG.csv", index=False)
-        w_data.to_csv(f"measurements/{current_time}_W.csv", index=False)
-        x_data.to_csv(f"measurements/{current_time}_X.csv", index=False)
+
+        save_folder_name = "./17_meas/" + current_time
+        os.mkdir(save_folder_name)
+
+        #print(angle_data)
+
+        mcu_data["Angle [rad]"] = mcu_data["Angle [rad]"] * 180 / pi        
+        mcu_data["Velocity [rad/s]"] = mcu_data["Velocity [rad/s]"] * 180 / pi
+
+        # df = df[['Timestamp', 'Target [norm]', 'Angle [deg]', 'Velocity [deg/s]']]
+        mcu_data = mcu_data[['Timestamp', 'Angle [rad]', 'Velocity [rad/s]', 'Target [norm]']]
+        mcu_data.columns = ['Timestamp', 'Angle [deg]', 'Velocity [deg/s]', 'Target [norm]']
+        
+        eeg_data.to_csv(f"{save_folder_name}/EMG.csv", index=False)
+        mcu_data.to_csv(f"{save_folder_name}/mcu.csv", index=False)
         print("Data saved successfully.")
 
 if __name__ == "__main__":

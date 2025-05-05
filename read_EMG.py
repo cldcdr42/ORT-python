@@ -2,16 +2,32 @@ import csv
 import pandas as pd
 import time
 import threading
-from concurrent.futures import ThreadPoolExecutor
-
-from math import pi
-
 import os
+from concurrent.futures import ThreadPoolExecutor
+from math import pi
+import serial
+import argparse
 
+import collections
 import statistics
 
 from pylsl import StreamInlet, resolve_streams, local_clock
-import serial
+
+
+# --- Parsing flags ---
+parser = argparse.ArgumentParser()
+
+parser.add_argument("-t", action="store_true", help="Use real source (instead of emulated) for EMG signal")
+parser.add_argument("-p", type=str, help="specify COM-port for MCU", default="COM4")
+parser.add_argument("-a", action="store_true", help="Verbose output for data")
+#parser.add_argument("--verbose", type=bool, help="Enable verbose mode")
+
+argum = parser.parse_args()
+
+#print(argum.t)
+#print(argum.p)
+#print(argum.a)
+# ---------------------
 
 def initialize_csv(file_path, data_type, headers):
     data_file = f"{file_path}{time.strftime('%Y%m%d-%H%M%S')}_{data_type}.csv"
@@ -44,10 +60,31 @@ def find_ard_port(com_port, baud_rate=9600):
         print(f"Error opening COM port {com_port}: {e}")
         return None
 
-def read_eeg_data(inlet, eeg_buffer, stop_event):
+def read_eeg_data(inlet, eeg_buffer, stop_event, arduino, threshold=0.005):
+    recent_samples = collections.deque(maxlen=200)
+    last_sent_time = 0
+    cooldown_seconds = 2
+
     while not stop_event.is_set():
         sample, timestamp = inlet.pull_sample()
-        eeg_buffer.append((timestamp, sample[0]))
+
+        value = sample[0]
+
+        eeg_buffer.append((timestamp, value))
+
+        recent_samples.append(value)
+
+        if len(recent_samples) == 200:
+
+            current_time = time.time()
+
+            if sum(abs(x) for x in recent_samples) / len(recent_samples) > threshold and (current_time - last_sent_time) >= cooldown_seconds:
+                try:
+                    print("Message send")
+                    last_sent_time = current_time
+                    arduino.write(f"Z60\n".encode('utf-8'))
+                except Exception as e:
+                    print("Error sending message")
 
 def send_command(arduino, command: str):
     if arduino and arduino.is_open:
@@ -73,7 +110,8 @@ def read_ard_data(serial_port, serial_port_buffer, stop_event):
         try:
             #print(repr(serial_port.readline().decode('utf-8')))
             line = serial_port.readline().decode('utf-8').strip()
-            #print(line)
+            if (argum.a):
+                print(line)
             if line:
                 timestamp = local_clock()
                 serial_port_buffer.append((timestamp, line))
@@ -106,14 +144,14 @@ def main():
         com_port = file.readline().strip()
         baud_rate = int(file.readline().strip())
 
-    arduino = find_ard_port(com_port, baud_rate)
+    arduino = find_ard_port(argum.p, baud_rate)
     if not arduino:
         return
     
     #           USE TEST SOURCE
     # ===========================================
     #
-    use_test_source = True
+    use_test_source = argum.t
     #
     # ==========================================
     #           USE TEST SOURCE
@@ -129,7 +167,7 @@ def main():
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         print("Starting data collection...")
-        executor.submit(read_eeg_data, inlet, eeg_buffer, stop_event)
+        executor.submit(read_eeg_data, inlet, eeg_buffer, stop_event, arduino)
         executor.submit(read_ard_data, arduino, serial_port_buffer, stop_event)
         executor.submit(user_command_interface, arduino, stop_event)
 
